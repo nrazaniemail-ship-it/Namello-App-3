@@ -10,9 +10,10 @@ on:
 permissions:
   contents: read
 
+# جلوگیری از لغو اجرای در حال انجام
 concurrency:
   group: namello-android-apk-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-apk:
@@ -31,14 +32,14 @@ jobs:
         with:
           node-version: "22"
 
-      # 3. نصب Java
+      # 3. نصب Java 21
       - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      # 4. تنظیم Android SDK
+      # 4. شناسایی Android SDK
       - name: Configure Android SDK
         shell: bash
         run: |
@@ -71,7 +72,6 @@ jobs:
 
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found."
-            echo "SDK directory: $SDK"
             exit 1
           fi
 
@@ -114,7 +114,7 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # 6. بررسی ساختار ریپازیتوری
+      # 6. بررسی ساختار مخزن
       - name: Verify repository layout
         shell: bash
         run: |
@@ -171,7 +171,7 @@ jobs:
           console.log(`Version code: ${version.versionCode}`);
           NODE
 
-      # 7. بررسی فایل‌های public
+      # 7. بررسی فایل‌های PWA
       - name: Verify public files
         shell: bash
         run: |
@@ -256,7 +256,7 @@ jobs:
       - name: Set Android version
         run: node scripts/set-android-version.mjs
 
-      # 16. نصب آیکون برنامه
+      # 16. نصب آیکون Namello
       - name: Install Namello launcher icon
         shell: bash
         run: |
@@ -327,7 +327,7 @@ jobs:
           ls -lh "$APK"
           sha256sum "$APK"
 
-      # 21. خواندن شماره نسخه
+      # 21. خواندن نسخه
       - name: Read version
         id: ver
         shell: bash
@@ -335,7 +335,7 @@ jobs:
           VERSION="$(node -p "JSON.parse(require('fs').readFileSync('version.json','utf8')).version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # 22. بارگذاری APK برای دانلود
+      # 22. بارگذاری APK
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
