@@ -31,14 +31,14 @@ jobs:
         with:
           node-version: "22"
 
-      # 3. نصب Java 21
+      # 3. نصب Java
       - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      # 4. شناسایی Android SDK بدون اکشن قدیمی
+      # 4. تنظیم Android SDK
       - name: Configure Android SDK
         shell: bash
         run: |
@@ -55,54 +55,60 @@ jobs:
             exit 1
           fi
 
+          SDKMANAGER=""
+
+          while IFS= read -r candidate; do
+            if [ -x "$candidate" ]; then
+              SDKMANAGER="$candidate"
+              break
+            fi
+          done < <(
+            find "$SDK/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              2>/dev/null || true
+          )
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            echo "SDK directory: $SDK"
+            exit 1
+          fi
+
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDKMANAGER_PATH=$SDKMANAGER" >> "$GITHUB_ENV"
 
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDK/cmdline-tools/16.0/bin" >> "$GITHUB_PATH"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
 
           echo "Android SDK: $SDK"
-          find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null || true
+          echo "SDK Manager: $SDKMANAGER"
 
-      # 5. نصب ابزارهای موردنیاز Android
+      # 5. پذیرش مجوزها و نصب بسته‌های Android
       - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER=""
+          echo "Accepting Android SDK licenses..."
 
-          for candidate in \
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
-          do
-            if [ -x "$candidate" ]; then
-              SDKMANAGER="$candidate"
-              break
-            fi
-          done
+          set +e
+          yes | "$SDKMANAGER_PATH" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses
 
-          if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager -perm /111 2>/dev/null \
-              | head -n 1 || true)"
-          fi
+          LICENSE_STATUS=${PIPESTATUS[1]}
+          set -e
 
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found."
+          if [ "$LICENSE_STATUS" -ne 0 ]; then
+            echo "ERROR: sdkmanager could not accept licenses."
             exit 1
           fi
 
-          echo "Using: $SDKMANAGER"
+          echo "Android SDK licenses accepted."
 
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses \
-            || {
-              echo "ERROR: Android SDK licenses could not be accepted."
-              exit 1
-            }
-
-          "$SDKMANAGER" \
+          "$SDKMANAGER_PATH" \
             --sdk_root="$ANDROID_HOME" \
             "platform-tools" \
             "platforms;android-35" \
@@ -142,7 +148,9 @@ jobs:
           );
 
           if (pkg.name !== 'namello-pwa') {
-            throw new Error(`Unexpected project name: ${pkg.name}`);
+            throw new Error(
+              `Unexpected project name: ${pkg.name}`
+            );
           }
 
           for (const script of ['build', 'test', 'typecheck']) {
@@ -151,7 +159,10 @@ jobs:
             }
           }
 
-          if (!version.version || !Number.isInteger(version.versionCode)) {
+          if (
+            !version.version ||
+            !Number.isInteger(version.versionCode)
+          ) {
             throw new Error('Invalid version.json');
           }
 
@@ -160,7 +171,7 @@ jobs:
           console.log(`Version code: ${version.versionCode}`);
           NODE
 
-      # 7. بررسی فایل‌های PWA
+      # 7. بررسی فایل‌های public
       - name: Verify public files
         shell: bash
         run: |
@@ -193,7 +204,7 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      # 9. بررسی نسخه
+      # 9. بررسی نسخه Namello
       - name: Verify Namello version
         run: node scripts/verify-namello-version.mjs
 
@@ -237,7 +248,7 @@ jobs:
           echo "Web build verified."
           ls -lh dist
 
-      # 14. تولید پروژه Android
+      # 14. ایجاد پروژه Android
       - name: Generate Android project
         run: npx cap add android
 
@@ -245,21 +256,22 @@ jobs:
       - name: Set Android version
         run: node scripts/set-android-version.mjs
 
-      # 16. نصب آیکون Namello
+      # 16. نصب آیکون برنامه
       - name: Install Namello launcher icon
         shell: bash
         run: |
           set -euo pipefail
 
           MANIFEST="android/app/src/main/AndroidManifest.xml"
+          ICON="assets/icon-only.png"
 
           test -s "$MANIFEST"
-          test -s "assets/icon-only.png"
+          test -s "$ICON"
 
           mkdir -p android/app/src/main/res/drawable-nodpi
 
           cp \
-            assets/icon-only.png \
+            "$ICON" \
             android/app/src/main/res/drawable-nodpi/namello_launcher.png
 
           sed -i \
@@ -307,7 +319,7 @@ jobs:
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -s "$APK" ]; then
-            echo "ERROR: APK was not generated"
+            echo "ERROR: APK was not generated."
             exit 1
           fi
 
@@ -315,7 +327,7 @@ jobs:
           ls -lh "$APK"
           sha256sum "$APK"
 
-      # 21. خواندن نسخه
+      # 21. خواندن شماره نسخه
       - name: Read version
         id: ver
         shell: bash
@@ -323,7 +335,7 @@ jobs:
           VERSION="$(node -p "JSON.parse(require('fs').readFileSync('version.json','utf8')).version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # 22. بارگذاری APK
+      # 22. بارگذاری APK برای دانلود
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
