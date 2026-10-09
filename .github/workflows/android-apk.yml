@@ -3,7 +3,9 @@ name: Namello Android APK Build
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
 
 permissions:
   contents: read
@@ -19,124 +21,236 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      # 1. دریافت سورس پروژه
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Normalise layout (fixes flat phone uploads)
-        run: |
-          set -eu
-          mkdir -p backend src/modules tests scripts assets index_scripts public/index_scripts
-          mv_if() { # $1 = file at repo root, $2 = destination folder
-            if [ -f "$1" ]; then
-              if [ -f "$2/$1" ]; then rm -f "$1"; else mv "$1" "$2/"; fi
-            fi
-          }
-          for n in crypto csv-import portfolio prop-firm psychology replay statistics sync; do mv_if "$n.ts" src/modules; done
-          for f in *.test.mjs; do mv_if "$f" tests; done
-          for f in set-android-version.mjs verify-namello-version.mjs; do mv_if "$f" scripts; done
-          for n in 0 1 2 3 4 12 16; do
-            if [ -f "$n.js" ]; then [ -e "public/index_scripts/$n.js" ] || cp "$n.js" public/index_scripts/; mv_if "$n.js" index_scripts; fi
-          done
-          mv_if icon-only.png assets
-          for f in server.mjs Caddyfile Dockerfile DEPLOYMENT.md docker-compose.yml docker-compose.local.yml; do mv_if "$f" backend; done
-          for f in icon-*.png icon-*.jpg manifest*.json sw.js widget.html; do
-            if [ -f "$f" ]; then [ -e "public/$f" ] || cp "$f" public/; fi
-          done
-          echo "Layout normalised."
-
-      - name: Verify repository layout
-        run: |
-          set -eu
-          for f in package.json index.html capacitor.config.ts version.json assets/icon-only.png; do
-            test -f "$f" || { echo "ERROR: $f not found in repository root. Upload the CONTENTS of the zip to the repo root."; exit 1; }
-          done
-          NAME=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).name")
-          test "$NAME" = "namello-pwa" || { echo "ERROR: package.json is '$NAME' (probably backend/package.json). Upload the root package.json of the app (name: namello-pwa)."; exit 1; }
-          echo "Repository layout OK."
-
+      # 2. نصب Node.js
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
+      # 3. نصب Java
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - name: Prepare Android SDK (preinstalled on the runner)
-        run: |
-          set +o pipefail
-          echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          set -e
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" > /dev/null
+      # 4. راه‌اندازی Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
+      # 5. نصب پلتفرم و ابزارهای Android
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            echo "ANDROID_HOME=${ANDROID_HOME}"
+            find "${ANDROID_HOME}" -maxdepth 5 -type f -name sdkmanager 2>/dev/null || true
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      # 6. بررسی فایل‌های اصلی پروژه
+      - name: Verify repository layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for f in \
+            package.json \
+            index.html \
+            vite.config.ts \
+            capacitor.config.ts \
+            version.json \
+            assets/icon-only.png \
+            scripts/set-android-version.mjs \
+            scripts/verify-namello-version.mjs
+          do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required file not found: $f"
+              exit 1
+            fi
+          done
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const v = JSON.parse(fs.readFileSync('version.json', 'utf8'));
+
+          if (p.name !== 'namello-pwa') {
+            throw new Error(`Unexpected package name: ${p.name}`);
+          }
+
+          for (const script of ['build', 'test', 'typecheck']) {
+            if (!p.scripts?.[script]) {
+              throw new Error(`Missing npm script: ${script}`);
+            }
+          }
+
+          if (!v.version || !Number.isInteger(v.versionCode)) {
+            throw new Error('Invalid version.json');
+          }
+
+          console.log(`Project: ${p.name}`);
+          console.log(`Version: ${v.version}`);
+          console.log(`Version code: ${v.versionCode}`);
+          NODE
+
+          echo "Repository layout verified."
+
+      # 7. نصب وابستگی‌ها
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Verify version consistency
+      # 8. بررسی هماهنگی نسخه‌ها
+      - name: Verify Namello version
         run: node scripts/verify-namello-version.mjs
 
+      # 9. اجرای تست‌ها
       - name: Run tests
         run: npm test
 
+      # 10. بررسی TypeScript
       - name: TypeScript check
         run: npm run typecheck
 
+      # 11. ساخت نسخه وب
       - name: Build web app
         run: npm run build
 
+      # 12. بررسی خروجی Vite
       - name: Verify web output
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
+
           test -s dist/index.html
-          for asset in icon-dashboard-logo.png icon-sessions.png icon-journal.png icon-mt5.jpg icon-tradingview.png icon-192.png icon-512.png; do
-            test -s "dist/$asset" || { echo "Missing build asset: dist/$asset"; exit 1; }
+
+          echo "Web build output:"
+          ls -lah dist
+
+          for asset in \
+            icon-dashboard-logo.png \
+            icon-sessions.png \
+            icon-journal.png \
+            icon-mt5.jpg \
+            icon-tradingview.png \
+            icon-192.png \
+            icon-512.png
+          do
+            if [ ! -s "dist/$asset" ]; then
+              echo "ERROR: Missing build asset: dist/$asset"
+              exit 1
+            fi
           done
 
+      # 13. ایجاد پروژه Android
       - name: Generate Android project
         run: npx cap add android
 
-      - name: Set Android version from version.json
+      # 14. تنظیم نسخه Android
+      - name: Set Android version
         run: node scripts/set-android-version.mjs
 
+      # 15. نصب آیکون Namello
       - name: Install Namello launcher icon
+        shell: bash
         run: |
-          set -eu
-          mkdir -p android/app/src/main/res/drawable-nodpi
-          cp assets/icon-only.png android/app/src/main/res/drawable-nodpi/namello_launcher.png
-          M=android/app/src/main/AndroidManifest.xml
-          sed -i 's#android:icon="@mipmap/ic_launcher"#android:icon="@drawable/namello_launcher"#' "$M"
-          sed -i 's#android:roundIcon="@mipmap/ic_launcher_round"#android:roundIcon="@drawable/namello_launcher"#' "$M"
-          grep -q 'android:icon="@drawable/namello_launcher"' "$M"
+          set -euo pipefail
 
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          test -s "$MANIFEST"
+          test -s "assets/icon-only.png"
+
+          mkdir -p android/app/src/main/res/drawable-nodpi
+
+          cp \
+            assets/icon-only.png \
+            android/app/src/main/res/drawable-nodpi/namello_launcher.png
+
+          sed -i \
+            's#android:icon="@mipmap/ic_launcher"#android:icon="@drawable/namello_launcher"#' \
+            "$MANIFEST"
+
+          sed -i \
+            's#android:roundIcon="@mipmap/ic_launcher_round"#android:roundIcon="@drawable/namello_launcher"#' \
+            "$MANIFEST"
+
+          grep -q 'android:icon="@drawable/namello_launcher"' "$MANIFEST"
+
+      # 16. همگام‌سازی Capacitor
       - name: Sync web assets to Android
         run: npx cap sync android
 
+      # 17. بررسی Gradle Wrapper
+      - name: Verify Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x android/gradlew
+
+      # 18. ساخت APK
       - name: Build debug APK
         working-directory: android
         run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
 
+      # 19. بررسی APK تولیدشده
       - name: Verify APK
+        shell: bash
         run: |
-          set -eu
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          sha256sum "$APK"
-          ls -lh "$APK"
+          set -euo pipefail
 
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
+          ls -lh "$APK"
+          sha256sum "$APK"
+
+      # 20. خواندن نسخه
       - name: Read version
         id: ver
-        run: echo "v=$(node -p "require('./version.json').version")" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('version.json','utf8')).version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # 21. بارگذاری APK برای دانلود
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
-          name: Namello-${{ steps.ver.outputs.v }}-Android-APK
+          name: Namello-${{ steps.ver.outputs.version }}-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
